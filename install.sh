@@ -11,13 +11,34 @@ systemctl stop xray
 # set variables
 UUID=$(xray uuid)
 X25519_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep 'Private' | awk '{print $3}')
-PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep 'Public' | awk '{print $3}')
+
+# Правильный парсинг ключей из вывода xray x25519
+PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep -i 'private key' | awk -F': ' '{print $2}' | tr -d ' ')
+PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep -i 'public key' | awk -F': ' '{print $2}' | tr -d ' ')
+
+# Если не получилось распарсить, пробуем альтернативный метод
+if [[ -z "$PRIVATE_KEY" ]]; then
+  PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk 'NR==1 {print $NF}')
+fi
+
+if [[ -z "$PUBLIC_KEY" ]]; then
+  PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk 'NR==2 {print $NF}')
+fi
+
 SHORT_ID=$(openssl rand -hex 8)
 
 PUBLIC_IP=$(curl -s ipinfo.io/ip)
 
 clear
+
+# Показываем сгенерированные ключи для проверки
+echo "Сгенерированные ключи:"
+echo "Private Key: ${PRIVATE_KEY}"
+echo "Public Key: ${PUBLIC_KEY}"
+echo "Short ID: ${SHORT_ID}"
+echo "UUID: ${UUID}"
+echo
+sleep 2
 
 while true; do
   read -p "Введи внешний IP этого сервера (или нажми Enter, чтобы использовать ${PUBLIC_IP}): " SERVER_IP
@@ -139,17 +160,26 @@ cat > /usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
+echo
+echo "Конфигурация создана. Проверка конфига..."
+cat /usr/local/etc/xray/config.json | grep -A 2 "privateKey"
+
 # apply settings
 systemctl restart xray
 sleep 2
 
 echo
 
-if systemctl status xray | grep -q active; then
-  echo "Xray статус:"
+if systemctl is-active --quiet xray; then
+  echo "✓ Xray статус:"
   systemctl status xray | grep Active
 else
-  echo "Ошибка: служба не запустилась. Попробуй указать другие домены или порты или используй предложенные значения"
+  echo "✗ Ошибка: служба не запустилась."
+  echo
+  echo "Логи ошибок:"
+  journalctl -u xray -n 20 --no-pager
+  echo
+  echo "Попробуй указать другие домены или порты или используй предложенные значения"
   exit 1
 fi
 
