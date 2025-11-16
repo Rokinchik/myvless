@@ -24,7 +24,7 @@ PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk '/Private/ {print $2}')
 PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk '/Public/ {print $2}')
 
 # Генерация корректного shortId (8-16 символов, URL-safe)
-SHORT_ID=$(tr -dc 'A-Za-z0-9_- ' < /dev/urandom | head -c12)
+SHORT_ID=$(LC_ALL=C tr -dc 'A-Za-z0-9_-' < /dev/urandom | head -c12)
 
 PUBLIC_IP=$(curl -s https://ipinfo.io/ip || curl -s https://ifconfig.co || echo "127.0.0.1")
 clear
