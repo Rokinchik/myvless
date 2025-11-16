@@ -187,7 +187,8 @@ fi
 echo
 echo "========================================"
 
-VLESS_LINK="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${CONNECTION_NAME}"
+# Полная ссылка со всеми параметрами: ALPN, packetEncoding, xudp
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none&alpn=h2,http/1.1&packetEncoding=xudp#${CONNECTION_NAME}"
 
 echo "Строка подключения сохранена в connect.txt:"
 echo
@@ -210,3 +211,6 @@ echo "UUID: ${UUID}"
 echo "Public Key: ${PUBLIC_KEY}"
 echo "Short ID: ${SHORT_ID}"
 echo "SNI: ${SNI}"
+echo "ALPN: h2,http/1.1"
+echo "Packet Encoding: xudp"
+echo "Flow: xtls-rprx-vision"
