@@ -1,40 +1,64 @@
 #!/usr/bin/env bash
-# Установка ПО
-apt update && apt install -y curl openssl jq  # Добавил jq для парсинга
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-systemctl enable xray
-systemctl stop xray
+set -euo pipefail
+IFS=$'\n\t'
 
-# Генерация переменных
+# Изменения: удалён Shadowsocks; добавлена поддержка flow=vision и shortId;
+# добавлен запрос комментария (вместо статичного "Dava"); генерируется QR-код (qrencode).
+# Также немного поправлен парсинг ключей x25519.
+
+info(){ echo -e "\n[INFO] $*"; }
+err(){ echo -e "\n[ERROR] $*" >&2; }
+
+# install soft
+apt update
+apt install -y curl openssl qrencode
+
+# install xray (official installer)
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+systemctl enable xray
+systemctl stop xray || true
+
+# set variables
 UUID=$(xray uuid)
-X25519_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep 'Private key:' | awk '{print $3}')  # Исправил парсинг (в новых версиях Xray формат может отличаться)
-PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep 'Public key:' | awk '{print $3}')
-while true; do
-  SS_PASS=$(openssl rand -base64 16)
-  if [[ "$SS_PASS" != *"/"* && "$SS_PASS" != *"+"* ]]; then
-    break
-  fi
-done
-SHORT_ID=$(openssl rand -hex 4)  # Генерация 8-символьного hex shortId (4 байта = 8 hex)
-PUBLIC_IP=$(curl -s ipinfo.io/ip)
+
+# generate x25519 keypair and parse robustly
+X25519_OUTPUT=$(xray x25519 2>/dev/null || true)
+PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk -F': ' '/[Pp]rivate/{print $2; exit}')
+PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk -F': ' '/[Pp]ublic|[Pp]assword/{print $2; exit}')
+
+# fallback if parsing failed (try to re-run)
+if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+  X25519_OUTPUT=$(xray x25519)
+  PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk -F': ' '/[Pp]rivate/{print $2; exit}')
+  PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk -F': ' '/[Pp]ublic|[Pp]assword/{print $2; exit}')
+fi
+
+# generate short id (hex)
+SHORT_ID=$(openssl rand -hex 4)
+
+# public IP detection
+PUBLIC_IP=$(curl -s ipinfo.io/ip || echo "127.0.0.1")
+
 clear
 
-# Ввод IP
+# Ask for server IP (or use detected)
 while true; do
-  read -p "Введи внешний IP этого сервера (или нажми Enter, чтобы использовать ${PUBLIC_IP}): " SERVER_IP
+  read -rp "Введи внешний IP этого сервера (или нажми Enter, чтобы использовать ${PUBLIC_IP}): " SERVER_IP
   SERVER_IP=${SERVER_IP:-${PUBLIC_IP}}
-  if ip a | grep -q "$SERVER_IP"; then
+  # accept 0.0.0.0 as listen all too
+  if ip a | grep -q "$SERVER_IP" || [[ "$SERVER_IP" == "0.0.0.0" ]]; then
     break
   else
     echo "Ошибка: адрес не назначен ни на один сетевой интерфейс."
   fi
 done
+
 echo
 
-# Ввод порта VLESS
+# Ask for VLESS port
 while true; do
-  read -p "Введи порт для VLESS (или нажми Enter, чтобы использовать рекомендуемый 443): " VLESS_PORT
+  read -rp "Введи порт для VLESS (или нажми Enter, чтобы использовать рекомендуемый 443): " VLESS_PORT
   VLESS_PORT=${VLESS_PORT:-443}
   if ! [[ $VLESS_PORT =~ ^[0-9]+$ ]]; then
     echo "Ошибка: необходимо указать число."
@@ -50,170 +74,95 @@ while true; do
   fi
   break
 done
+
 echo
 
-# Ввод SNI
+# Ask for SNI/masking domain (must support TLS1.3)
 while true; do
-  read -p "Введи адрес маскировочного домена для Reality (или нажми Enter, чтобы использовать www.yahoo.com): " SNI
+  read -rp "Введи адрес маскировочного домена для Reality (или нажми Enter, чтобы использовать www.yahoo.com): " SNI
   SNI=${SNI:-'www.yahoo.com'}
-  OPENSSL_OUTPUT=$(timeout 3 openssl s_client -connect "$SNI":443 -brief 2>&1)
-  if ! echo "$OPENSSL_OUTPUT" | grep -q "TLSv1.3"; then
+  OPENSSL_OUTPUT=$(timeout 3 openssl s_client -connect "${SNI}:443" -brief 2>&1 || true)
+  if echo "$OPENSSL_OUTPUT" | grep -q "TLSv1.3"; then
+    break
+  else
     echo "Ошибка: указанный сервер должен поддерживать TLSv1.3, попробуй другой."
-    continue
   fi
-  break
-done
-echo
-
-# Ввод порта SS
-while true; do
-  read -p "Введи порт для Shadowsocks (или нажми Enter, чтобы использовать 8888): " SS_PORT
-  SS_PORT=${SS_PORT:-8888}
-  if ! [[ $SS_PORT =~ ^[0-9]+$ ]]; then
-    echo "Ошибка: необходимо указать число."
-    continue
-  fi
-  if (( SS_PORT < 1 || SS_PORT > 49151 )); then
-    echo "Ошибка: порт должен быть из допустимого диапазона."
-    continue
-  fi
-  if ss -tln | grep -q ":$SS_PORT "; then
-    echo "Ошибка: порт занят, укажи другой."
-    continue
-  fi
-  break
 done
 
-# Подготовка config.json
-cat << EOF > /usr/local/etc/xray/config.json
-{
-  "log": {
-    "loglevel": "info"
-  },
-  "inbounds": [
-    {
-      "listen": "${SERVER_IP}",
-      "port": ${VLESS_PORT},
-      "protocol": "vless",
-      "tag": "reality-in",
-      "settings": {
-        "clients": [
-          {
-            "id": "${UUID}",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${SNI}:443",
-          "xver": 0,
-          "serverNames": [
-            "${SNI}"
-          ],
-          "privateKey": "${PRIVATE_KEY}",
-          "minClientVer": "",
-          "maxClientVer": "",
-          "maxTimeDiff": 0,
-          "shortIds": [
-            "${SHORT_ID}",
-            ""  // Добавил пустой для совместимости
-          ]
-        },
-        "tcpSettings": {
-          "header": {
-            "type": "http"
-          }
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ]
-      }
-    },
-    {
-      "port": ${SS_PORT},
-      "tag": "ss-in",
-      "protocol": "shadowsocks",
-      "settings": {
-        "method": "2022-blake3-aes-128-gcm",
-        "password": "${SS_PASS}",
-        "network": "tcp,udp"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls"
-        ]
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct",
-      "settings": {
-        "domainStrategy": "UseIP"
-      }
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "outboundTag": "block",
-        "domain": [
-          "geosite:category-ads-all"
-        ]
-      },
-      {
-        "type": "field",
-        "outboundTag": "direct",
-        "network": "udp,tcp"
-      }
-    ]
-  }
-}
-EOF
-
-# Применение настроек
-systemctl restart xray
-sleep 1
 echo
-if systemctl status xray | grep -q active; then
-  echo "Xray статус:"
-  systemctl status xray | grep Active
-else
-  echo "Ошибка: служба не запустилась. Попробуй указать другие домены или порты или используй предложенные значения"
+
+# Ask for a comment to put into the client link (was static "Dava")
+read -rp "Какой комментарий оставить (будет в конце ссылки, по умолчанию 'Dava'): " COMMENT
+COMMENT=${COMMENT:-Dava}
+
+# prepare config file (template expected at ./config.json.template)
+if [[ ! -f ./config.json.template ]]; then
+  err "Файл config.json.template не найден в текущей директории."
   exit 1
 fi
 
-# Генерация строк подключения
+cp ./config.json.template /usr/local/etc/xray/config.json
+
+# Replace placeholders in template
+# Note: use '|' as sed delimiter to reduce escaping issues.
+sed -i "s|SERVER_IP|${SERVER_IP}|g" /usr/local/etc/xray/config.json
+sed -i "s|VLESS_PORT|${VLESS_PORT}|g" /usr/local/etc/xray/config.json
+sed -i "s|UUID|${UUID}|g" /usr/local/etc/xray/config.json
+sed -i "s|PRIVATE_KEY|${PRIVATE_KEY}|g" /usr/local/etc/xray/config.json
+sed -i "s|PUBLIC_KEY|${PUBLIC_KEY}|g" /usr/local/etc/xray/config.json
+sed -i "s|SHORT_ID|${SHORT_ID}|g" /usr/local/etc/xray/config.json
+sed -i "s|SNI|${SNI}|g" /usr/local/etc/xray/config.json
+
+# IMPORTANT:
+# - The template must not contain Shadowsocks sections/PLACEHOLDERS anymore (we removed SS).
+# - Ensure the template contains placeholders: SERVER_IP, VLESS_PORT, UUID, PRIVATE_KEY, PUBLIC_KEY, SHORT_ID, SNI
+
+# restart xray and check status
+systemctl restart xray
+sleep 1
+
+echo
+if systemctl is-active --quiet xray; then
+  echo "Xray статус: active"
+else
+  echo "Ошибка: служба не запустилась. Попробуй указать другие домены или порты или используй предложенные значения"
+  journalctl -u xray --no-pager -n 50 || true
+  exit 1
+fi
+
+# Build VLESS Reality (vision) URI
+# Note: many clients accept query params like pbk (public key), shortid, flow etc. Fragment (#) used for comment/remark.
+VLESS_URI="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}/?encryption=none&type=tcp&security=reality&sni=${SNI}&fp=chrome&alpn=h2&flow=xtls-rprx-vision&pbk=${PUBLIC_KEY}&shortid=${SHORT_ID}&packetEncoding=xudp#${COMMENT}"
+
+# Save connection info
 echo
 echo "========================================"
-echo "Строки подключения сохранены в connect.txt:"
+echo "Строки подключения сохранены в connect.txt и vless_qr.png"
 echo
-echo "VLESS:" > connect.txt
-echo "vless://${UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&type=tcp&sni=${SNI}&fp=chrome&security=reality&alpn=h2&flow=xtls-rprx-vision&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&packetEncoding=xudp" >> connect.txt
-echo >> connect.txt
-echo "Shadowsocks-2022:" >> connect.txt
-echo "ss://2022-blake3-aes-128-gcm:${SS_PASS}@${SERVER_IP}:${SS_PORT}" >> connect.txt
+
+cat > connect.txt <<EOF
+VLESS (Reality, flow=vision, shortId):
+${VLESS_URI}
+
+Конфигурационный файл: /usr/local/etc/xray/config.json
+UUID: ${UUID}
+PrivateKey: (скрыт)
+PublicKey: ${PUBLIC_KEY}
+ShortID: ${SHORT_ID}
+SNI: ${SNI}
+EOF
+
+# generate QR-code (png) and also print to terminal (UTF8)
+if command -v qrencode >/dev/null 2>&1; then
+  qrencode -o vless_qr.png "${VLESS_URI}"
+  echo -e "\nQR-код сохранён в vless_qr.png (PNG). Также вывод QR в терминал:\n"
+  qrencode -t UTF8 "${VLESS_URI}"
+else
+  echo "qrencode не найден — QR-код не будет создан."
+fi
+
+echo
 cat connect.txt
 echo
 echo "========================================"
-echo "ShortId: ${SHORT_ID} (добавлен для усиления маскировки)"
-echo "Используй vpn-клиент Hiddify - https://github.com/hiddify/hiddify-app или v2rayNG для Android/iOS."
+echo "Используй vpn-клиент Hiddify - https://github.com/hiddify/hiddify-app (по желанию)."
