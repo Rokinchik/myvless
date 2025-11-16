@@ -7,12 +7,20 @@ systemctl stop xray
 # Генерация переменных
 UUID=$(xray uuid)
 X25519_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep 'Private key:' | awk '{print $3}') # Исправил парсинг (в новых версиях Xray формат может отличаться)
-PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep 'Public key:' | awk '{print $3}')
+# Улучшенный парсинг: sed для извлечения после "Private key: "
+PRIVATE_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Private key:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+PUBLIC_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Public key:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+# Проверка ключей
+if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+  echo "Ошибка: Не удалось сгенерировать ключи! Вывод xray x25519:"
+  echo "$X25519_OUTPUT"
+  exit 1
+fi
+echo "Сгенерированы ключи: Private=${PRIVATE_KEY:0:10}... Public=${PUBLIC_KEY:0:10}..."  # Debug (закомментируй если не нужно)
 SHORT_ID=$(openssl rand -hex 4) # Генерация 8-символьного hex shortId (4 байта = 8 hex)
 PUBLIC_IP=$(curl -s ipinfo.io/ip)
 clear
-# Ввод IP
+# Ввод IP (только для URL, не для listen)
 while true; do
   read -p "Введи внешний IP этого сервера (или нажми Enter, чтобы использовать ${PUBLIC_IP}): " SERVER_IP
   SERVER_IP=${SERVER_IP:-${PUBLIC_IP}}
@@ -46,9 +54,12 @@ echo
 while true; do
   read -p "Введи адрес маскировочного домена для Reality (или нажми Enter, чтобы использовать www.yahoo.com): " SNI
   SNI=${SNI:-'www.yahoo.com'}
+  echo "Проверяю TLSv1.3 для $SNI..."
   OPENSSL_OUTPUT=$(timeout 3 openssl s_client -connect "$SNI":443 -brief 2>&1)
   if ! echo "$OPENSSL_OUTPUT" | grep -q "TLSv1.3"; then
-    echo "Ошибка: указанный сервер должен поддерживать TLSv1.3, попробуй другой."
+    echo "Ошибка: указанный сервер должен поддерживать TLSv1.3."
+    echo "Вывод openssl: $OPENSSL_OUTPUT"
+    echo "Попробуй другой домен (например, www.google.com)."
     continue
   fi
   break
@@ -62,7 +73,7 @@ cat << EOF > /usr/local/etc/xray/config.json
   },
   "inbounds": [
     {
-      "listen": "${SERVER_IP}",
+      "listen": null,
       "port": ${VLESS_PORT},
       "protocol": "vless",
       "tag": "reality-in",
@@ -144,13 +155,17 @@ cat << EOF > /usr/local/etc/xray/config.json
 EOF
 # Применение настроек
 systemctl restart xray
-sleep 1
+sleep 2
 echo
 if systemctl status xray | grep -q active; then
-  echo "Xray статус:"
-  systemctl status xray | grep Active
+  echo "Xray статус: active (running)"
+  echo "Успех! Конфиг применён."
 else
-  echo "Ошибка: служба не запустилась. Попробуй указать другие домены или порты или используй предложенные значения"
+  echo "Ошибка: служба не запустилась."
+  echo "Последние логи Xray (journalctl):"
+  journalctl -u xray -n 10 --no-pager
+  echo "Попробуй указать другие домены или порты, или используй предложенные значения."
+  echo "Также проверь firewall: ufw allow ${VLESS_PORT}/tcp или iptables -A INPUT -p tcp --dport ${VLESS_PORT} -j ACCEPT"
   exit 1
 fi
 # Ввод комментария
@@ -166,9 +181,12 @@ echo "VLESS:" > connect.txt
 echo "$VLESS_URL" >> connect.txt
 cat connect.txt
 echo
-echo "QR-код для подключения:"
+echo "QR-код для подключения (отсканируй в Hiddify/v2rayNG):"
 qrencode -t ansi "$VLESS_URL"
 echo
 echo "========================================"
 echo "ShortId: ${SHORT_ID} (добавлен для усиления маскировки)"
+echo "Private Key в config: ${PRIVATE_KEY:0:10}... (проверь в /usr/local/etc/xray/config.json)"
+echo "Public Key для клиента: ${PUBLIC_KEY}"
 echo "Используй vpn-клиент Hiddify - https://github.com/hiddify/hiddify-app или v2rayNG для Android/iOS."
+echo "Для мониторинга: journalctl -u xray -f"
