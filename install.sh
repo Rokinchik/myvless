@@ -1,138 +1,182 @@
 #!/usr/bin/env bash
-set -euo pipefail
-IFS=$'\n\t'
 
-info(){ echo -e "\n[INFO] $*"; }
-err(){ echo -e "\n[ERROR] $*" >&2; }
+# install soft
+apt update && apt install -y curl openssl qrencode
 
-# Установка нужных пакетов
-apt update
-apt install -y curl openssl qrencode || { err "Не удалось установить curl/openssl/qrencode"; exit 1; }
-
-# Установка Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
 systemctl enable xray
 systemctl stop xray
 
-# Генерация UUID
+# set variables
 UUID=$(xray uuid)
-
-# Генерация ключей X25519
 X25519_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk '/Private/ {print $2}')
-PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk '/Public/ {print $2}')
+PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep 'Private' | awk '{print $3}')
+PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep 'Public' | awk '{print $3}')
+SHORT_ID=$(openssl rand -hex 8)
 
-# Генерация корректного shortId (8-16 символов, URL-safe)
-SHORT_ID=$(LC_ALL=C tr -dc 'A-Za-z0-9_-' < /dev/urandom | head -c12)
+PUBLIC_IP=$(curl -s ipinfo.io/ip)
 
-PUBLIC_IP=$(curl -s https://ipinfo.io/ip || curl -s https://ifconfig.co || echo "127.0.0.1")
 clear
 
-# Выбор IP сервера
 while true; do
-  read -p "Введи внешний IP сервера (Enter = ${PUBLIC_IP}): " SERVER_IP
+  read -p "Введи внешний IP этого сервера (или нажми Enter, чтобы использовать ${PUBLIC_IP}): " SERVER_IP
   SERVER_IP=${SERVER_IP:-${PUBLIC_IP}}
   if ip a | grep -q "$SERVER_IP"; then
     break
   else
-    echo "Ошибка: адрес $SERVER_IP не назначен ни на один сетевой интерфейс."
+    echo "Ошибка: адрес не назначен ни на один сетевой интерфейс."
   fi
 done
 
-# Ввод порта VLESS
+echo
+
 while true; do
-  read -p "Введи порт для VLESS (Enter = 443): " VLESS_PORT
+  read -p "Введи порт для VLESS (или нажми Enter, чтобы использовать рекомендуемый 443): " VLESS_PORT
   VLESS_PORT=${VLESS_PORT:-443}
-  if ! [[ $VLESS_PORT =~ ^[0-9]+$ ]]; then echo "Нужно число"; continue; fi
-  if (( VLESS_PORT < 1 || VLESS_PORT > 49151 )); then echo "Порт вне диапазона"; continue; fi
-  if ss -tln | grep -q ":$VLESS_PORT\s"; then echo "Порт занят"; continue; fi
+  if ! [[ $VLESS_PORT =~ ^[0-9]+$ ]]; then
+    echo "Ошибка: необходимо указать число."
+    continue
+  fi
+  if (( VLESS_PORT < 1 || VLESS_PORT > 65535 )); then
+    echo "Ошибка: порт должен быть из допустимого диапазона."
+    continue
+  fi
+  if ss -tln | grep -q ":$VLESS_PORT "; then
+    echo "Ошибка: порт занят, укажи другой."
+    continue
+  fi
   break
 done
 
-# Маскировочный домен
+echo
+
 while true; do
-  read -p "Введи SNI для Reality (Enter = www.yahoo.com): " SNI
+  read -p "Введи адрес маскировочного домена для Reality (или нажми Enter, чтобы использовать www.yahoo.com): " SNI
   SNI=${SNI:-'www.yahoo.com'}
-  OPENSSL_OUTPUT=$(timeout 3 openssl s_client -connect "$SNI":443 -brief 2>&1 || true)
-  if echo "$OPENSSL_OUTPUT" | grep -q "Protocol.*TLSv1.3"; then break; else echo "TLSv1.3 отсутствует"; fi
+  OPENSSL_OUTPUT=$(timeout 3 openssl s_client -connect "$SNI":443 -brief 2>&1)
+  if ! echo "$OPENSSL_OUTPUT" | grep -q "TLSv1.3"; then
+    echo "Ошибка: указанный сервер должен поддерживать TLSv1.3, попробуй другой."
+    continue
+  fi
+  break
 done
 
-# Комментарий клиента
-read -p "Комментарий клиента (Enter = Dava): " CLIENT_COMMENT
-CLIENT_COMMENT=${CLIENT_COMMENT:-Dava}
+echo
 
-# Вариант ручного shortId
-read -p "Использовать сгенерированный shortId (${SHORT_ID})? [Y/n]: " USE_SHORT
-if [[ "$USE_SHORT" =~ ^[Nn]$ ]]; then
-  read -p "Введи shortId (URL-safe, 8-16 символов): " SHORT_ID_CUSTOM
-  if [[ -n "$SHORT_ID_CUSTOM" ]]; then
-    SHORT_ID=$(echo "$SHORT_ID_CUSTOM" | tr -dc 'A-Za-z0-9_- ' | cut -c1-16)
+while true; do
+  read -p "Введи комментарий для подключения (например, имя сервера): " CONNECTION_NAME
+  if [[ -z "$CONNECTION_NAME" ]]; then
+    echo "Ошибка: комментарий не может быть пустым."
+    continue
   fi
-fi
+  break
+done
 
-# Создание конфигурации Xray
-mkdir -p /usr/local/etc/xray
+# prepare config file
 cat > /usr/local/etc/xray/config.json <<EOF
 {
-  "log": {"loglevel": "info"},
-  "inbounds": [{
-    "listen": "${SERVER_IP}",
-    "port": ${VLESS_PORT},
-    "protocol": "vless",
-    "tag": "reality-in",
-    "settings": {
-      "clients": [{
-        "id": "${UUID}",
-        "flow": "xtls-rprx-vision",
-        "email": "${CLIENT_COMMENT}",
-        "shortId": "${SHORT_ID}"
-      }],
-      "decryption": "none"
-    },
-    "streamSettings": {
-      "network": "tcp",
-      "security": "reality",
-      "realitySettings": {
-        "show": false,
-        "dest": "${SNI}:443",
-        "xver": 0,
-        "serverNames": ["${SNI}"],
-        "privateKey": "${PRIVATE_KEY}",
-        "minClientVer": "",
-        "maxClientVer": "",
-        "maxTimeDiff": 0,
-        "shortIds": ["${SHORT_ID}"]
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "listen": "${SERVER_IP}",
+      "port": ${VLESS_PORT},
+      "protocol": "vless",
+      "tag": "reality-in",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "${SNI}:443",
+          "xver": 0,
+          "serverNames": [
+            "${SNI}"
+          ],
+          "privateKey": "${PRIVATE_KEY}",
+          "minClientVer": "",
+          "maxClientVer": "",
+          "maxTimeDiff": 0,
+          "shortIds": [
+            "${SHORT_ID}"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
       }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
     },
-    "sniffing": {"enabled": true,"destOverride":["http","tls","quic"]}
-  }],
-  "outbounds": [{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"block"}],
-  "routing": {"domainStrategy": "IPIfNonMatch"}
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch"
+  }
 }
 EOF
 
-# Перезапуск Xray
+# apply settings
 systemctl restart xray
-sleep 1
+sleep 2
 
-if systemctl status xray | grep -q "Active: active (running)"; then
-  info "Xray успешно запущен"
+echo
+
+if systemctl status xray | grep -q active; then
+  echo "Xray статус:"
+  systemctl status xray | grep Active
 else
-  err "Ошибка запуска Xray. Проверь логи: journalctl -u xray"
+  echo "Ошибка: служба не запустилась. Попробуй указать другие домены или порты или используй предложенные значения"
   exit 1
 fi
 
-# Генерация VLESS URI
-ENC_COMMENT=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "${CLIENT_COMMENT}")
-VLESS_URI="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}/?encryption=none&security=reality&type=tcp&fp=chrome&flow=xtls-rprx-vision&alpn=h2&pbk=${PUBLIC_KEY}&packetEncoding=xudp&shortid=${SHORT_ID}#${ENC_COMMENT}"
+# Get connection strings
+echo
+echo "========================================"
 
-CONNECT_FILE="connect.txt"
-echo -e "VLESS (Reality, xtls-rprx-vision):\n${VLESS_URI}\n\nServer: ${SERVER_IP}:${VLESS_PORT}\nUUID: ${UUID}\nPublicKey: ${PUBLIC_KEY}\nPrivateKey: ${PRIVATE_KEY}\nSNI: ${SNI}\nshortId: ${SHORT_ID}\nКомментарий: ${CLIENT_COMMENT}" > "${CONNECT_FILE}"
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#${CONNECTION_NAME}"
 
-# QR-код
-QR_PNG="vless_qr.png"
-echo -e "\nQR (ASCII) для подключения:"
-echo -n "${VLESS_URI}" | qrencode -t UTF8
-echo -n "${VLESS_URI}" | qrencode -o "${QR_PNG}"
-echo -e "\nQR PNG сохранён в: ${QR_PNG}\nПодключение в файле: ${CONNECT_FILE}"
+echo "Строка подключения сохранена в connect.txt:"
+echo
+echo "$VLESS_LINK" | tee connect.txt
+echo
+echo "========================================"
+echo "QR-код для подключения:"
+echo
+qrencode -t ANSIUTF8 "$VLESS_LINK"
+echo
+echo "QR-код также сохранён в файл qr.png"
+qrencode -o qr.png "$VLESS_LINK"
+echo
+echo "========================================"
+echo "Используй vpn-клиент Hiddify - https://github.com/hiddify/hiddify-app"
+echo "Или любой клиент с поддержкой VLESS Reality (v2rayN, v2rayNG, Nekobox)"
+echo
+echo "Параметры подключения:"
+echo "UUID: ${UUID}"
+echo "Public Key: ${PUBLIC_KEY}"
+echo "Short ID: ${SHORT_ID}"
+echo "SNI: ${SNI}"
