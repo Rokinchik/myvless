@@ -6,18 +6,30 @@ systemctl enable xray
 systemctl stop xray
 # Генерация переменных
 UUID=$(xray uuid)
+if [[ -z "$UUID" ]]; then
+  echo "Ошибка: Не удалось сгенерировать UUID!"
+  exit 1
+fi
 X25519_OUTPUT=$(xray x25519)
-# Улучшенный парсинг: sed для извлечения после "Private key: "
-PRIVATE_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Private key:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
-PUBLIC_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Public key:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+# Парсинг для новой версии (v25+): PrivateKey, Password (pub), Hash32
+PRIVATE_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*PrivateKey:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+PUBLIC_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Password:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+HASH32=$(echo "$X25519_OUTPUT" | sed -n 's/.*Hash32:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+# Fallback для старого формата (если нужно)
+if [[ -z "$PRIVATE_KEY" ]]; then
+  PRIVATE_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Private key:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+fi
+if [[ -z "$PUBLIC_KEY" ]]; then
+  PUBLIC_KEY=$(echo "$X25519_OUTPUT" | sed -n 's/.*Public key:[[:space:]]*//p' | head -n1 | tr -d ' \n\r')
+fi
 # Проверка ключей
 if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
   echo "Ошибка: Не удалось сгенерировать ключи! Вывод xray x25519:"
   echo "$X25519_OUTPUT"
   exit 1
 fi
-echo "Сгенерированы ключи: Private=${PRIVATE_KEY:0:10}... Public=${PUBLIC_KEY:0:10}..."  # Debug (закомментируй если не нужно)
-SHORT_ID=$(openssl rand -hex 4) # Генерация 8-символьного hex shortId (4 байта = 8 hex)
+echo "Сгенерированы ключи: Private=${PRIVATE_KEY:0:10}... Public=${PUBLIC_KEY:0:10}... (Hash32=${HASH32:0:10}...)"
+SHORT_ID=$(openssl rand -hex 4) # Random hex, или используй ${HASH32:0:8} если хочешь
 PUBLIC_IP=$(curl -s ipinfo.io/ip)
 clear
 # Ввод IP (только для URL, не для listen)
@@ -188,5 +200,6 @@ echo "========================================"
 echo "ShortId: ${SHORT_ID} (добавлен для усиления маскировки)"
 echo "Private Key в config: ${PRIVATE_KEY:0:10}... (проверь в /usr/local/etc/xray/config.json)"
 echo "Public Key для клиента: ${PUBLIC_KEY}"
+echo "Hash32 (опционально): ${HASH32}"
 echo "Используй vpn-клиент Hiddify - https://github.com/hiddify/hiddify-app или v2rayNG для Android/iOS."
 echo "Для мониторинга: journalctl -u xray -f"
