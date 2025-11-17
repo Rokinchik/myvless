@@ -12,17 +12,30 @@ systemctl stop xray
 UUID=$(xray uuid)
 X25519_OUTPUT=$(xray x25519)
 
+echo "=========================================="
+echo "Отладка: Вывод xray x25519:"
+echo "$X25519_OUTPUT"
+echo "=========================================="
+
 # Правильный парсинг ключей из вывода xray x25519
-PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep -i 'private key' | awk -F': ' '{print $2}' | tr -d ' ')
-PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep -i 'public key' | awk -F': ' '{print $2}' | tr -d ' ')
+PRIVATE_KEY=$(echo "$X25519_OUTPUT" | grep -i 'private key' | awk -F': ' '{print $2}' | tr -d ' \r\n')
+PUBLIC_KEY=$(echo "$X25519_OUTPUT" | grep -i 'public key' | awk -F': ' '{print $2}' | tr -d ' \r\n')
 
 # Если не получилось распарсить, пробуем альтернативный метод
 if [[ -z "$PRIVATE_KEY" ]]; then
-  PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk 'NR==1 {print $NF}')
+  PRIVATE_KEY=$(echo "$X25519_OUTPUT" | awk 'NR==1 {print $NF}' | tr -d ' \r\n')
 fi
 
 if [[ -z "$PUBLIC_KEY" ]]; then
-  PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk 'NR==2 {print $NF}')
+  PUBLIC_KEY=$(echo "$X25519_OUTPUT" | awk 'NR==2 {print $NF}' | tr -d ' \r\n')
+fi
+
+# Проверка что ключи не пустые
+if [[ -z "$PRIVATE_KEY" ]] || [[ -z "$PUBLIC_KEY" ]]; then
+  echo "ОШИБКА: Не удалось извлечь ключи!"
+  echo "PRIVATE_KEY='${PRIVATE_KEY}'"
+  echo "PUBLIC_KEY='${PUBLIC_KEY}'"
+  exit 1
 fi
 
 SHORT_ID=$(openssl rand -hex 8)
@@ -32,13 +45,16 @@ PUBLIC_IP=$(curl -s ipinfo.io/ip)
 clear
 
 # Показываем сгенерированные ключи для проверки
+echo "=========================================="
 echo "Сгенерированные ключи:"
+echo "=========================================="
+echo "UUID: ${UUID}"
 echo "Private Key: ${PRIVATE_KEY}"
 echo "Public Key: ${PUBLIC_KEY}"
 echo "Short ID: ${SHORT_ID}"
-echo "UUID: ${UUID}"
+echo "=========================================="
 echo
-sleep 2
+sleep 3
 
 while true; do
   read -p "Введи внешний IP этого сервера (или нажми Enter, чтобы использовать ${PUBLIC_IP}): " SERVER_IP
@@ -93,6 +109,9 @@ while true; do
   fi
   break
 done
+
+# URL encode для комментария
+CONNECTION_NAME_ENCODED=$(echo -n "$CONNECTION_NAME" | jq -sRr @uri 2>/dev/null || python3 -c "import urllib.parse; print(urllib.parse.quote('''$CONNECTION_NAME'''))" 2>/dev/null || echo "$CONNECTION_NAME")
 
 # prepare config file
 cat > /usr/local/etc/xray/config.json <<EOF
@@ -171,8 +190,8 @@ sleep 2
 echo
 
 if systemctl is-active --quiet xray; then
-  echo "✓ Xray статус:"
-  systemctl status xray | grep Active
+  echo "✓ Xray запущен успешно!"
+  systemctl status xray --no-pager | grep Active
 else
   echo "✗ Ошибка: служба не запустилась."
   echo
@@ -185,32 +204,46 @@ fi
 
 # Get connection strings
 echo
-echo "========================================"
+echo "=========================================="
+echo "           ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ        "
+echo "=========================================="
 
-# Полная ссылка со всеми параметрами: ALPN, packetEncoding, xudp
-VLESS_LINK="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none&alpn=h2,http/1.1&packetEncoding=xudp#${CONNECTION_NAME}"
+# Полная ссылка со всеми параметрами
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none&alpn=h2,http/1.1&packetEncoding=xudp#${CONNECTION_NAME_ENCODED}"
 
-echo "Строка подключения сохранена в connect.txt:"
 echo
-echo "$VLESS_LINK" | tee connect.txt
+echo "Строка подключения:"
+echo "$VLESS_LINK"
 echo
-echo "========================================"
-echo "QR-код для подключения:"
+echo "$VLESS_LINK" > connect.txt
+echo "Сохранено в connect.txt"
+echo
+echo "=========================================="
+echo "           QR-КОД ДЛЯ ПОДКЛЮЧЕНИЯ        "
+echo "=========================================="
 echo
 qrencode -t ANSIUTF8 "$VLESS_LINK"
 echo
-echo "QR-код также сохранён в файл qr.png"
 qrencode -o qr.png "$VLESS_LINK"
+echo "QR-код сохранён в файл qr.png"
 echo
-echo "========================================"
-echo "Используй vpn-клиент Hiddify - https://github.com/hiddify/hiddify-app"
-echo "Или любой клиент с поддержкой VLESS Reality (v2rayN, v2rayNG, Nekobox)"
-echo
-echo "Параметры подключения:"
+echo "=========================================="
+echo "         ПАРАМЕТРЫ ПОДКЛЮЧЕНИЯ           "
+echo "=========================================="
+echo "Сервер: ${SERVER_IP}:${VLESS_PORT}"
 echo "UUID: ${UUID}"
 echo "Public Key: ${PUBLIC_KEY}"
 echo "Short ID: ${SHORT_ID}"
 echo "SNI: ${SNI}"
-echo "ALPN: h2,http/1.1"
-echo "Packet Encoding: xudp"
 echo "Flow: xtls-rprx-vision"
+echo "ALPN: h2, http/1.1"
+echo "Packet Encoding: xudp"
+echo "Fingerprint: chrome"
+echo "=========================================="
+echo
+echo "Рекомендуемые клиенты:"
+echo "• Hiddify - https://github.com/hiddify/hiddify-app"
+echo "• v2rayN (Windows)"
+echo "• v2rayNG (Android)"
+echo "• Nekobox (Multi-platform)"
+echo "=========================================="
